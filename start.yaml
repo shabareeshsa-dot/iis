@@ -1,0 +1,69 @@
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  WebServer: '74.225.27.222'          # replace with VM IP/hostname
+  SiteName: 'Default Web Site'
+  AppPoolName: 'DefaultAppPool'
+  IISUser: 'Shabareesh'               # move to Variable Group as secret
+  IISPassword: 'Shabareesh@7'         # move to Variable Group as secret
+
+stages:
+- stage: ManageIIS
+  displayName: 'Manage IIS Site and App Pool via PowerShell Remoting'
+  jobs:
+  - job: IISControl
+    displayName: 'Start Site & App Pool'
+    steps:
+
+    - task: PowerShell@2
+      displayName: 'Start IIS Site and App Pool remotely'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Connecting to remote server: $(WebServer)"
+
+          $sec  = ConvertTo-SecureString "$(IISPassword)" -AsPlainText -Force
+          $cred = [PSCredential]::new("$(IISUser)", $sec)
+          $opts = New-PSSessionOption -SkipCACheck -SkipCNCheck   # self-signed cert
+
+          $session = New-PSSession -ComputerName "$(WebServer)" -UseSSL -Port 5986 -Authentication Basic -Credential $cred -SessionOption $opts
+          try {
+            Invoke-Command -Session $session -ArgumentList "$(SiteName)", "$(AppPoolName)" -ScriptBlock {
+              param($site, $pool)
+              Import-Module WebAdministration
+
+              # Start App Pool
+              try {
+                $poolState = (Get-WebAppPoolState -Name $pool -ErrorAction Stop).Value
+                if ($poolState -ne 'Started') {
+                  Start-WebAppPool -Name $pool -ErrorAction Stop
+                  Write-Host ("App pool started: {0}" -f $pool)
+                } else {
+                  Write-Host ("App pool already started: {0}" -f $pool)
+                }
+              } catch {
+                Write-Warning ("Error starting app pool {0}: {1}" -f $pool, $_)
+                throw
+              }
+
+              # Start Site
+              try {
+                $siteState = (Get-WebsiteState -Name $site -ErrorAction Stop).Value
+                if ($siteState -ne 'Started') {
+                  Start-Website -Name $site -ErrorAction Stop
+                  Write-Host ("Site Started: {0}" -f $site)
+                } else {
+                  Write-Host ("Site already Started: {0}" -f $site)
+                }
+              } catch {
+                Write-Warning ("Error stopping site {0}: {1}" -f $site, $_)
+                throw
+              }
+
+            }
+          } finally {
+            if ($session) { Remove-PSSession $session }
+          }
