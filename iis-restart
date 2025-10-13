@@ -1,0 +1,153 @@
+trigger: none
+
+variables:
+  azureSubscription: 'iis'   # ADO service connection (ARM) 
+  resourceGroup: 'test-rg'
+  vmName: 'test-win-vm'
+  siteName: 'CustomerService'
+  appPoolName: 'CustomerServicePool'
+  healthUrl: 'http://localhost/'              
+  healthTimeoutSeconds: 120
+
+pool:
+  vmImage: 'windows-latest'
+
+stages:
+- stage: CD
+  displayName: 'Stop and Start the IIS'
+  jobs:
+  - job:
+    steps:
+    - task: AzurePowerShell@5
+  displayName: "IIS STOP (Site + AppPool) on ${{ parameters.vmName }}"
+  inputs:
+    azureSubscription: '${{ parameters.azureSubscription }}'
+    ScriptType: 'InlineScript'
+    azurePowerShellVersion: 'LatestVersion'
+    Inline: |
+      $rg='${{ parameters.resourceGroup }}'
+      $vm='${{ parameters.vmName }}'
+
+      $ps = @'
+      Import-Module WebAdministration
+
+      $site = "${{ parameters.siteName }}"
+      $pool = "${{ parameters.appPoolName }}"
+
+      Write-Host "==> Stopping IIS components"
+      # Stop site
+      try {
+        $siteState = (Get-WebsiteState -Name $site -ErrorAction Stop).Value
+        if ($siteState -eq 'Started') {
+          Write-Host "Stopping site: $site"
+          Stop-Website -Name $site
+        } else {
+          Write-Host "Site already stopped: $site"
+        }
+      } catch { Write-Host "Site not found or error: $($_.Exception.Message)" }
+
+      # Stop pool
+      try {
+        $poolState = (Get-WebAppPoolState -Name $pool -ErrorAction Stop).Value
+        if ($poolState -eq 'Started') {
+          Write-Host "Stopping app pool: $pool"
+          Stop-WebAppPool -Name $pool
+        } else {
+          Write-Host "App pool already stopped: $pool"
+        }
+      } catch { Write-Host "App pool not found or error: $($_.Exception.Message)" }
+
+      # Wait until both not Started
+      $deadline = (Get-Date).AddSeconds(60)
+      do {
+        $s = (Get-WebsiteState -Name $site -ErrorAction SilentlyContinue).Value
+        $p = (Get-WebAppPoolState -Name $pool -ErrorAction SilentlyContinue).Value
+        if ($s -ne 'Started' -and $p -ne 'Started') { break }
+        Start-Sleep -Seconds 2
+      } while ((Get-Date) -lt $deadline)
+
+      Write-Host "Stop complete. Site: $s | Pool: $p"
+      '@
+
+      Invoke-AzVMRunCommand -ResourceGroupName $rg -Name $vm -CommandId 'RunPowerShellScript' -ScriptString $ps
+
+    - task: AzurePowerShell@5
+      displayName: "Print Windows VM Name"
+      inputs:
+        azureSubscription: 'iis'    
+        ScriptType: 'InlineScript'
+        azurePowerShellVersion: 'LatestVersion'
+        Inline: |
+            $rg = 'test-rg'                   
+            $vm = 'test-win-vm'                      
+
+            $script = 'Write-Host "VM Name: $env:COMPUTERNAME"'
+
+            $result = Invoke-AzVMRunCommand -ResourceGroupName $rg -Name $vm -CommandId 'RunPowerShellScript' -ScriptString $script
+
+            # Print output nicely
+            $result.Value[0].Message
+
+    - task: AzurePowerShell@5
+  displayName: "IIS START (AppPool + Site) on ${{ parameters.vmName }}"
+  inputs:
+    azureSubscription: '${{ parameters.azureSubscription }}'
+    ScriptType: 'InlineScript'
+    azurePowerShellVersion: 'LatestVersion'
+    Inline: |
+      $rg='${{ parameters.resourceGroup }}'
+      $vm='${{ parameters.vmName }}'
+      $healthUrl='${{ parameters.healthUrl }}'
+      $timeout=[int]'${{ parameters.healthTimeoutSeconds }}'
+
+      $ps = @'
+      Import-Module WebAdministration
+
+      $site = "${{ parameters.siteName }}"
+      $pool = "${{ parameters.appPoolName }}"
+      $healthUrl = "${{ parameters.healthUrl }}"
+      $timeoutSec = [int]"${{ parameters.healthTimeoutSeconds }}"
+
+      Write-Host "==> Starting App Pool then Site"
+
+      # Start app pool
+      try {
+        if ((Get-WebAppPoolState -Name $pool).Value -ne 'Started') {
+          Start-WebAppPool -Name $pool
+          Write-Host "App pool started: $pool"
+        } else {
+          Write-Host "App pool already started: $pool"
+        }
+      } catch { throw "Failed to start app pool $pool: $($_.Exception.Message)" }
+
+      # Start site
+      try {
+        if ((Get-WebsiteState -Name $site).Value -ne 'Started') {
+          Start-Website -Name $site
+          Write-Host "Site started: $site"
+        } else {
+          Write-Host "Site already started: $site"
+        }
+      } catch { throw "Failed to start site $site: $($_.Exception.Message)" }
+
+      # Health check (best effort)
+      if ($healthUrl -and $healthUrl -ne '') {
+        Write-Host "Health check: $healthUrl (timeout ${timeoutSec}s)"
+        $deadline = (Get-Date).AddSeconds($timeoutSec)
+        $ok=$false
+        while ((Get-Date) -lt $deadline) {
+          try {
+            $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
+            if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) { $ok=$true; break }
+          } catch { Start-Sleep -Seconds 2 }
+          Start-Sleep -Seconds 2
+        }
+        if ($ok) {
+          Write-Host "Health check passed."
+        } else {
+          Write-Warning "Health check did not pass within timeout."
+        }
+      }
+      '@
+
+      Invoke-AzVMRunCommand -ResourceGroupName $rg -Name $vm -CommandId 'RunPowerShellScript' -ScriptString $ps
