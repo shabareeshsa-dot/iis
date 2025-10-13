@@ -1,0 +1,124 @@
+trigger: none
+
+pool:
+  name: Default  # Replace with your self-hosted agent pool name
+
+variables:
+  WebServer: '10.0.0.4'          # Replace with your VM's IP or hostname
+  SiteName: 'CustomerService'
+  AppPoolName: 'CustomerServicePool'
+
+stages:
+- stage: ManageIIS
+  displayName: 'Manage IIS Site and App Pool via PowerShell Remoting'
+  jobs:
+  - job: IISControl
+    displayName: 'Stop Site & App Pool, Print VM Name, Start Site & App Pool'
+    steps:
+    - task: PowerShell@2
+      displayName: 'Stop IIS Site and App Pool remotely'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Connecting to remote server: $(WebServer)"
+
+          $password = ConvertTo-SecureString "$(IISPassword)" -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential ("$(IISUser)", $password)
+
+          $session = New-PSSession -ComputerName "$(WebServer)" -Credential $cred
+
+          Invoke-Command -Session $session -ScriptBlock {
+              param($site, $pool)
+              Import-Module WebAdministration
+
+              # Stop Site
+              try {
+                  $siteState = (Get-WebsiteState -Name $site).Value
+                  if ($siteState -eq 'Started') {
+                      Write-Host "Stopping site: $site"
+                      Stop-Website -Name $site
+                  } else {
+                      Write-Host "Site already stopped: $site"
+                  }
+              } catch {
+                  Write-Warning "Error stopping site $site: $_"
+              }
+
+              # Stop App Pool
+              try {
+                  $poolState = (Get-WebAppPoolState -Name $pool).Value
+                  if ($poolState -eq 'Started') {
+                      Write-Host "Stopping app pool: $pool"
+                      Stop-WebAppPool -Name $pool
+                  } else {
+                      Write-Host "App pool already stopped: $pool"
+                  }
+              } catch {
+                  Write-Warning "Error stopping app pool $pool: $_"
+              }
+          } -ArgumentList "$(SiteName)", "$(AppPoolName)"
+
+          Remove-PSSession $session
+
+    - task: PowerShell@2
+      displayName: 'Print remote VM computer name'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Connecting to remote server: $(WebServer)"
+
+          $password = ConvertTo-SecureString "$(IISPassword)" -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential ("$(IISUser)", $password)
+
+          $session = New-PSSession -ComputerName "$(WebServer)" -Credential $cred
+
+          Invoke-Command -Session $session -ScriptBlock {
+              Write-Host "Remote VM Name: $env:COMPUTERNAME"
+          }
+
+          Remove-PSSession $session
+
+    - task: PowerShell@2
+      displayName: 'Start IIS App Pool and Site remotely'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Connecting to remote server: $(WebServer)"
+
+          $password = ConvertTo-SecureString "$(IISPassword)" -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential ("$(IISUser)", $password)
+
+          $session = New-PSSession -ComputerName "$(WebServer)" -Credential $cred
+
+          Invoke-Command -Session $session -ScriptBlock {
+              param($site, $pool)
+              Import-Module WebAdministration
+
+              # Start App Pool
+              try {
+                  $poolState = (Get-WebAppPoolState -Name $pool).Value
+                  if ($poolState -ne 'Started') {
+                      Start-WebAppPool -Name $pool
+                      Write-Host "App pool started: $pool"
+                  } else {
+                      Write-Host "App pool already started: $pool"
+                  }
+              } catch {
+                  Write-Warning "Error starting app pool $pool: $_"
+              }
+
+              # Start Site
+              try {
+                  $siteState = (Get-WebsiteState -Name $site).Value
+                  if ($siteState -ne 'Started') {
+                      Start-Website -Name $site
+                      Write-Host "Site started: $site"
+                  } else {
+                      Write-Host "Site already started: $site"
+                  }
+              } catch {
+                  Write-Warning "Error starting site $site: $_"
+              }
+          } -ArgumentList "$(SiteName)", "$(AppPoolName)"
+
+          Remove-PSSession $session
